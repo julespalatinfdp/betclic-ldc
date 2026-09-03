@@ -30,12 +30,80 @@ const TIERS = [
 ];
 
 // ── DONNÉES ──
+// État tenu en mémoire, écritures asynchrones différées et atomiques.
+// Objectif : zéro blocage de l'event loop pendant les pics d'affluence.
+const FLUSH_MS = parseInt(process.env.FLUSH_MS || '2000', 10);
+const TMP_PATH = DATA_PATH + '.tmp';
+
+let DB = null;
+let dirty = false;
+let flushTimer = null;
+let writing = false;
+let stats = { interactions: 0, flushes: 0 };
+
 function loadData() {
-  if (!fs.existsSync(DATA_PATH)) return { sessions: {}, picks: {}, results: {} };
-  try { return JSON.parse(fs.readFileSync(DATA_PATH, 'utf8')); }
-  catch { return { sessions: {}, picks: {}, results: {} }; }
+  if (DB) return DB;
+  const empty = { sessions: {}, picks: {}, results: {} };
+  if (!fs.existsSync(DATA_PATH)) { DB = empty; return DB; }
+  try {
+    DB = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'));
+    if (!DB.sessions) DB.sessions = {};
+    if (!DB.picks) DB.picks = {};
+    if (!DB.results) DB.results = {};
+  } catch (e) {
+    console.error('[DB] Lecture impossible, démarrage à vide :', e.message);
+    DB = empty;
+  }
+  return DB;
 }
-function saveData(d) { fs.writeFileSync(DATA_PATH, JSON.stringify(d, null, 2)); }
+
+// Marque l'état comme modifié : l'écriture réelle est groupée.
+function saveData() {
+  dirty = true;
+  if (!flushTimer) flushTimer = setTimeout(flush, FLUSH_MS);
+}
+
+// Écriture atomique : fichier temporaire puis renommage.
+// Une coupure en cours d'écriture ne peut pas corrompre le fichier principal.
+async function flush() {
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  if (!dirty || !DB || writing) return;
+  writing = true;
+  dirty = false;
+  try {
+    await fs.promises.writeFile(TMP_PATH, JSON.stringify(DB));
+    await fs.promises.rename(TMP_PATH, DATA_PATH);
+    stats.flushes++;
+  } catch (e) {
+    console.error('[DB] Écriture échouée :', e.message);
+    dirty = true; // on retentera au prochain cycle
+    if (!flushTimer) flushTimer = setTimeout(flush, FLUSH_MS);
+  } finally {
+    writing = false;
+  }
+}
+
+// Écriture immédiate et bloquante. Coûte environ 1 ms.
+function flushSync(label) {
+  if (!DB || !dirty || writing) return;
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  try {
+    fs.writeFileSync(TMP_PATH, JSON.stringify(DB));
+    fs.renameSync(TMP_PATH, DATA_PATH);
+    dirty = false;
+    stats.flushes++;
+    if (label) console.log(`[DB] ${label}`);
+  } catch (e) { console.error('[DB] Écriture synchrone échouée :', e.message); }
+}
+
+// Actions critiques (validation d'une sélection, actions admin) : écriture
+// immédiate et garantie, même en cas de coupure brutale. Une validation par
+// membre sur la soirée, pour environ 7 ms chacune : le coût est négligeable.
+
+// Railway envoie SIGTERM avant de couper le container lors d'un redéploiement.
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => { flushSync('Sauvegarde finale avant arrêt.'); process.exit(0); });
+}
 
 // ── PARSING : "Équipe A vs Équipe B = cote1 | cote2 | cote3 | cote4 | cote5" ──
 function parseMatch(str) {
@@ -250,7 +318,8 @@ function scheduleClose(client, sid) {
       const dd = loadData();
       if (!dd.sessions[sid] || dd.sessions[sid].closed) return;
       dd.sessions[sid].closed = true;
-      saveData(dd);
+      saveData();
+      flushSync();
       console.log(`🔒 Session ${sid} fermée automatiquement.`);
       const ss = dd.sessions[sid];
       const ch = await client.channels.fetch(ss.channelId);
@@ -270,6 +339,7 @@ client.on('warn',  (msg) => console.warn('[client warn]', msg));
 
 client.on('interactionCreate', async interaction => {
   try {
+    stats.interactions++;
 
     // ══ SLASH COMMANDS ══
     if (interaction.isChatInputCommand()) {
@@ -305,7 +375,8 @@ client.on('interactionCreate', async interaction => {
 
         const d = loadData();
         d.sessions[sid] = s;
-        saveData(d);
+        saveData();
+        flushSync();
         scheduleClose(client, sid);
 
         if (ADMIN_LOG_CHANNEL) {
@@ -330,7 +401,8 @@ client.on('interactionCreate', async interaction => {
         if (!s) return await interaction.reply({ content: `❌ Session \`${sid}\` introuvable.`, flags: MessageFlags.Ephemeral });
         if (s.closed) return await interaction.reply({ content: '🔒 Déjà fermée.', flags: MessageFlags.Ephemeral });
         s.closed = true;
-        saveData(d);
+        saveData();
+        flushSync();
         try {
           const ch = await client.channels.fetch(s.channelId);
           const msg = await ch.messages.fetch(s.messageId);
@@ -359,7 +431,8 @@ client.on('interactionCreate', async interaction => {
         // On retire les résultats précédents de ce match puis on réinjecte
         d.results[sid] = d.results[sid].filter(p => !p.startsWith(`${matchNum}-`));
         for (const n of nums) d.results[sid].push(pickId(matchNum, n - 1));
-        saveData(d);
+        saveData();
+        flushSync();
 
         const detail = nums.length
           ? nums.map(n => `${TIERS[n - 1].emoji} ${m.cotes[n - 1].label} (${m.cotes[n - 1].pts} pts)`).join('\n')
@@ -486,7 +559,7 @@ client.on('interactionCreate', async interaction => {
       } else {
         cur.push(id);
       }
-      saveData(d);
+      saveData();
 
       return await interaction.update({
         embeds: [buildMatchEmbed(d, s, sid, uid, mi, warning)],
@@ -511,7 +584,8 @@ client.on('interactionCreate', async interaction => {
         });
       }
       d.picks[uid][sid].validatedAt = Date.now();
-      saveData(d);
+      saveData();
+      flushSync(); // la validation est définitive : écriture garantie
       const e = buildRecapEmbed(d, s, sid, uid)
         .setTitle('🔒 Sélection validée')
         .setColor('#00C853');
@@ -531,6 +605,17 @@ client.on('interactionCreate', async interaction => {
 
 client.once('ready', () => {
   console.log(`⚽ LDC Groupes connecté : ${client.user.tag}`);
+
+  // Suivi de charge : ne loggue que s'il s'est passé quelque chose
+  let last = 0;
+  setInterval(() => {
+    if (stats.interactions === last) return;
+    const delta = stats.interactions - last;
+    last = stats.interactions;
+    const mem = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+    console.log(`📊 ${delta} interactions/min · ${stats.interactions} au total · ${stats.flushes} écritures · ${mem} Mo`);
+  }, 60000);
+
   const d = loadData();
   for (const [sid, s] of Object.entries(d.sessions)) {
     if (!s.closed && new Date(s.closeAt) > new Date()) {
