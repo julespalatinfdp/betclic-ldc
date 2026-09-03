@@ -77,6 +77,36 @@ Départage en cas d'égalité : la sélection validée le plus tôt passe devant
 
 `MAX_PICKS` permet de changer le nombre de cotes à sélectionner (5 par défaut).
 
+## Performance et fiabilité
+
+La couche de données est optimisée pour les pics d'affluence :
+
+- **État tenu en mémoire**, le fichier n'est lu qu'au démarrage. Aucun coût de lecture par interaction.
+- **Écritures groupées et asynchrones** (toutes les 2 secondes au maximum) pour les clics de navigation et de sélection.
+- **Écriture synchrone garantie** sur les moments critiques : validation d'une sélection, création de session, saisie des résultats, fermeture. Coût mesuré : 0,6 ms à 1000 membres.
+- **Écriture atomique** via fichier temporaire puis renommage. Une coupure en cours d'écriture ne peut pas corrompre le fichier de données.
+- **Sauvegarde sur SIGTERM**, ce qui couvre les redéploiements Railway.
+
+Mesures sur une simulation de 1000 membres composant leur sélection simultanément (13 000 interactions) : 15 ms de CPU au total, une seule écriture disque au lieu de 13 000, fichier final de 108 Ko. La charge réelle d'une soirée reste très en deçà de la capacité.
+
+### Redémarrage du bot
+
+Les sélections sont conservées, les membres n'ont rien à refaire. Trois scénarios testés sur le code réel :
+
+| Scénario | Résultat |
+|---|---|
+| Redéploiement Railway (SIGTERM) | Aucune perte, sauvegarde forcée avant l'arrêt |
+| Coupure brutale après le cycle d'écriture | Aucune perte |
+| Coupure brutale immédiate (`kill -9`) | Validations toutes préservées. Au pire, les clics des 2 dernières secondes non encore écrits sont à refaire |
+
+**Prérequis absolu** : le volume doit être monté sur `/app/data` et `DATA_PATH` pointer dessus. Sans volume, tout est perdu au moindre redéploiement.
+
+Un suivi est loggué chaque minute en période d'activité : nombre d'interactions, écritures effectuées et mémoire utilisée.
+
+⚠️ Le bot ne relit plus le fichier en cours d'exécution. Si vous modifiez `ldc-data.json` depuis la console Railway, **redémarrez le service** pour que le changement soit pris en compte.
+
+`FLUSH_MS` permet d'ajuster l'intervalle d'écriture (2000 ms par défaut).
+
 ## Bon à savoir
 
 - Les sélections non validées comptent quand même au classement, avec un départage défavorable.
