@@ -96,7 +96,7 @@ function buildPublicEmbed(s) {
     .setTitle(s.name)
     .setDescription(
       `**Compose ta sélection de ${MAX_PICKS} cotes parmi les ${nbCotes} de la soirée.**\n` +
-      `Tu piges où tu veux, autant de cotes que tu veux sur un même match.\n\n` +
+      `Tu pioches où tu veux, autant de cotes que tu veux sur un même match.\n\n` +
       `**Barème**\n` +
       `🟢 Facile · **2 pts**\n` +
       `🟡 Moyen · **4 pts**\n` +
@@ -109,6 +109,17 @@ function buildPublicEmbed(s) {
     .setColor(COLOR);
   if (s.image) e.setImage(s.image);
   return e;
+}
+
+function buildPanelRows(sid, closed) {
+  const b = [];
+  if (!closed) {
+    b.push(new ButtonBuilder().setCustomId(`ldc:open:${sid}`)
+      .setLabel('Composer ma sélection').setEmoji('🎯').setStyle(ButtonStyle.Primary));
+  }
+  b.push(new ButtonBuilder().setCustomId(`ldc:mypicks:${sid}`)
+    .setLabel('Ma sélection').setEmoji('📋').setStyle(ButtonStyle.Secondary));
+  return [new ActionRowBuilder().addComponents(...b)];
 }
 
 function buildMatchEmbed(d, s, sid, uid, mi, warning) {
@@ -246,7 +257,7 @@ function scheduleClose(client, sid) {
       const msg = await ch.messages.fetch(ss.messageId);
       await msg.edit({
         embeds: [buildPublicEmbed(ss).setColor('#e74c3c').setTitle(`🔴 ${ss.name} · SÉLECTIONS FERMÉES`)],
-        components: [],
+        components: buildPanelRows(sid, true),
       });
     } catch (e) { console.error('[AutoClose]', e.message); }
   }, delay);
@@ -289,10 +300,7 @@ client.on('interactionCreate', async interaction => {
         const sid = `ldc_${Date.now()}`;
         const s = { id: sid, name, matches, closeAt: closeDate.toISOString(), closed: false, channelId: channel.id, messageId: null, image };
 
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`ldc:open:${sid}`).setLabel('Composer ma sélection').setEmoji('🎯').setStyle(ButtonStyle.Primary),
-        );
-        const msg = await channel.send({ embeds: [buildPublicEmbed(s)], components: [row] });
+        const msg = await channel.send({ embeds: [buildPublicEmbed(s)], components: buildPanelRows(sid, false) });
         s.messageId = msg.id;
 
         const d = loadData();
@@ -326,7 +334,7 @@ client.on('interactionCreate', async interaction => {
         try {
           const ch = await client.channels.fetch(s.channelId);
           const msg = await ch.messages.fetch(s.messageId);
-          await msg.edit({ embeds: [buildPublicEmbed(s).setColor('#e74c3c').setTitle(`🔴 ${s.name} · SÉLECTIONS FERMÉES`)], components: [] });
+          await msg.edit({ embeds: [buildPublicEmbed(s).setColor('#e74c3c').setTitle(`🔴 ${s.name} · SÉLECTIONS FERMÉES`)], components: buildPanelRows(sid, true) });
         } catch (e) { console.error('[close-ldc]', e.message); }
         return await interaction.reply({ content: `🔒 **${s.name}** fermée.`, flags: MessageFlags.Ephemeral });
       }
@@ -422,6 +430,23 @@ client.on('interactionCreate', async interaction => {
       return await interaction.reply({
         embeds: [buildMatchEmbed(d, s, sid, uid, 0)],
         components: buildMatchRows(d, s, sid, uid, 0),
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
+    // Consulter sa sélection, accessible à tout moment depuis le panneau public
+    if (action === 'mypicks') {
+      if (!sel.length) {
+        return await interaction.reply({
+          content: s.closed
+            ? "🔴 Les sélections sont fermées et tu n'avais pas participé à cette soirée."
+            : "Tu n'as pas encore de sélection. Clique sur **🎯 Composer ma sélection** pour commencer.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+      return await interaction.reply({
+        embeds: [buildRecapEmbed(d, s, sid, uid)],
+        components: buildRecapRows(d, s, sid, uid),
         flags: MessageFlags.Ephemeral,
       });
     }
