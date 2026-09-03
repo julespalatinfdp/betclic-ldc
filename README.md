@@ -7,13 +7,15 @@ Maximum théorique : 40 points (5 cotes difficiles).
 
 ## Parcours membre
 
-1. Panneau public avec le visuel, la liste des matchs et le bouton **🎯 Composer ma sélection**
+1. Panneau public avec le visuel, la liste des matchs et deux boutons : **🎯 Composer ma sélection** et **📋 Ma sélection**
 2. Navigation match par match : les 5 cotes du match en boutons, avec leur difficulté et leurs points
 3. Un clic sélectionne, un second retire. Le compteur `●●●○○ 3/5` reste visible en permanence
 4. **📋 Ma sélection** affiche le récap groupé par match à tout moment
 5. **✅ Valider** s'active à 5/5 et verrouille définitivement
 
 Le bouton Valider reste grisé tant que la sélection n'est pas complète, et affiche la progression (`Valider (3/5)`).
+
+Le bouton **📋 Ma sélection** du panneau public reste accessible à tout moment, y compris après la fermeture : les membres peuvent revoir leurs cotes et, une fois les résultats saisis, voir lesquelles sont passées et leur total.
 
 ## Commandes admin
 
